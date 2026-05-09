@@ -1,6 +1,6 @@
 """
-CVCraft API — Production FastAPI Backend
-────────────────────────────────────────
+CVCraft API — Production FastAPI Backend with DeepSeek
+──────────────────────────────────────────────────────
 Routes:
   Auth      POST /auth/register · POST /auth/login · GET /auth/me
   Resumes   GET/POST /resumes · GET/PUT/DELETE /resumes/{id}
@@ -20,12 +20,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request, status
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, EmailStr
 from supabase import create_client, Client
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic  # Using Anthropic SDK with DeepSeek endpoint
 import io
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -33,28 +33,33 @@ log = logging.getLogger("cvcraftapi")
 
 # ─── ENV ──────────────────────────────────────────────────────────────────────
 SUPABASE_URL       = os.environ["SUPABASE_URL"]
-SUPABASE_KEY       = os.environ["SUPABASE_SERVICE_KEY"]       # service role key (server only)
+SUPABASE_KEY       = os.environ["SUPABASE_SERVICE_KEY"]
 SUPABASE_ANON_KEY  = os.environ["SUPABASE_ANON_KEY"]
-ANTHROPIC_KEY      = os.environ["ANTHROPIC_API_KEY"]
+DEEPSEEK_API_KEY   = os.environ["DEEPSEEK_API_KEY"]  # Changed from ANTHROPIC_API_KEY
 PAYSTACK_SECRET    = os.environ["PAYSTACK_SECRET_KEY"]
 PAYSTACK_WEBHOOK_SECRET = os.environ["PAYSTACK_WEBHOOK_SECRET"]
 FRONTEND_URL       = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 
 # ─── CLIENTS ──────────────────────────────────────────────────────────────────
-supabase: Client   = create_client(SUPABASE_URL, SUPABASE_KEY)
-claude             = AsyncAnthropic(api_key=ANTHROPIC_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# DeepSeek with Anthropic-compatible endpoint
+deepseek = AsyncAnthropic(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com/anthropic",  # DeepSeek's Anthropic-compatible endpoint
+)
 
 # ─── APP SETUP ────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("CVCraft API starting up")
+    log.info("CVCraft API starting up with DeepSeek AI")
     yield
     log.info("CVCraft API shutting down")
 
 app = FastAPI(
     title="CVCraft API",
     version="1.0.0",
-    description="AI-powered resume builder backend",
+    description="AI-powered resume builder backend powered by DeepSeek",
     lifespan=lifespan,
 )
 
@@ -88,8 +93,8 @@ class ResumeData(BaseModel):
 
 class ExportRequest(BaseModel):
     resume_id: Optional[str] = None
-    resume_data: Optional[dict] = None   # inline data (no save needed)
-    format: str = "pdf"                  # pdf | docx
+    resume_data: Optional[dict] = None
+    format: str = "pdf"
 
 class BulletsRequest(BaseModel):
     job_title: str
@@ -111,7 +116,7 @@ class MatchRequest(BaseModel):
     job_description: str
 
 class InitPaymentRequest(BaseModel):
-    plan: str      # pro | lifetime
+    plan: str
     email: EmailStr
 
 class VerifyPaymentRequest(BaseModel):
@@ -120,12 +125,10 @@ class VerifyPaymentRequest(BaseModel):
 
 # ─── AUTH HELPERS ─────────────────────────────────────────────────────────────
 async def get_current_user(authorization: str = Header(None)) -> dict:
-    """Verify Supabase JWT and return user dict."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     token = authorization.split(" ", 1)[1]
     try:
-        # Supabase verifies the JWT and returns the user
         resp = supabase.auth.get_user(token)
         if not resp or not resp.user:
             raise HTTPException(status_code=401, detail="Invalid token")
@@ -134,7 +137,6 @@ async def get_current_user(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
 
 async def get_user_plan(user_id: str) -> str:
-    """Returns 'free' | 'pro' | 'lifetime'"""
     try:
         r = supabase.table("subscriptions").select("plan").eq("user_id", user_id).single().execute()
         return r.data.get("plan", "free") if r.data else "free"
@@ -142,7 +144,6 @@ async def get_user_plan(user_id: str) -> str:
         return "free"
 
 def require_plan(minimum: str):
-    """Dependency factory: require minimum plan level."""
     order = {"free": 0, "pro": 1, "lifetime": 2}
     async def _check(user: dict = Depends(get_current_user)):
         plan = await get_user_plan(user["id"])
@@ -157,11 +158,11 @@ def require_plan(minimum: str):
 # ─── HEALTH ───────────────────────────────────────────────────────────────────
 @app.get("/", tags=["Health"])
 async def root():
-    return {"status": "ok", "service": "CVCraft API", "version": "1.0.0"}
+    return {"status": "ok", "service": "CVCraft API", "version": "1.0.0", "ai_provider": "DeepSeek"}
 
 @app.get("/health", tags=["Health"])
 async def health():
-    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat(), "ai": "DeepSeek"}
 
 # ─── AUTH ROUTES ──────────────────────────────────────────────────────────────
 @app.post("/auth/register", tags=["Auth"])
@@ -173,7 +174,6 @@ async def register(body: RegisterRequest):
             "options": {"data": {"full_name": body.full_name}}
         })
         if resp.user:
-            # Create free subscription record
             supabase.table("subscriptions").upsert({
                 "user_id": resp.user.id,
                 "plan": "free",
@@ -218,7 +218,6 @@ async def list_resumes(user: dict = Depends(get_current_user)):
     plan = await get_user_plan(user["id"])
     r = supabase.table("resumes").select("id,title,template,updated_at,created_at").eq("user_id", user["id"]).order("updated_at", desc=True).execute()
     resumes = r.data or []
-    # Free plan: cap at 1
     if plan == "free":
         resumes = resumes[:1]
     return {"resumes": resumes, "count": len(resumes), "plan": plan}
@@ -254,7 +253,6 @@ async def get_resume(resume_id: str, user: dict = Depends(get_current_user)):
 
 @app.put("/resumes/{resume_id}", tags=["Resumes"])
 async def update_resume(resume_id: str, body: ResumeData, user: dict = Depends(get_current_user)):
-    # Verify ownership
     existing = supabase.table("resumes").select("id").eq("id", resume_id).eq("user_id", user["id"]).single().execute()
     if not existing.data:
         raise HTTPException(status_code=404, detail="Resume not found")
@@ -278,14 +276,12 @@ async def delete_resume(resume_id: str, user: dict = Depends(get_current_user)):
 
 # ─── EXPORT ROUTES ────────────────────────────────────────────────────────────
 def build_resume_html(resume: dict, template: str = "executive") -> str:
-    """Build a clean, print-ready HTML for PDF generation."""
     p = resume.get("personal_info", {})
     experience = resume.get("experience", [])
     education = resume.get("education", [])
     skills = resume.get("skills", [])
     certifications = resume.get("certifications", [])
 
-    # Template color map
     colors = {
         "executive": {"accent": "#4f46e5", "head_bg": "#fff",    "head_color": "#1a1a2e", "border": "#1a1a2e"},
         "minimal":   {"accent": "#999",    "head_bg": "#fff",    "head_color": "#111",    "border": "#eee"},
@@ -379,7 +375,6 @@ def build_resume_html(resume: dict, template: str = "executive") -> str:
 </html>"""
 
 async def html_to_pdf(html: str) -> bytes:
-    """Convert HTML to PDF using WeasyPrint."""
     try:
         from weasyprint import HTML, CSS
         pdf_bytes = HTML(string=html, base_url=None).write_pdf(
@@ -387,10 +382,7 @@ async def html_to_pdf(html: str) -> bytes:
         )
         return pdf_bytes
     except ImportError:
-        raise HTTPException(
-            status_code=500,
-            detail="WeasyPrint not installed. Run: pip install weasyprint"
-        )
+        raise HTTPException(status_code=500, detail="WeasyPrint not installed")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF generation failed: {str(e)}")
 
@@ -398,21 +390,12 @@ async def html_to_pdf(html: str) -> bytes:
 async def export_pdf(body: ExportRequest, user: dict = Depends(get_current_user)):
     plan = await get_user_plan(user["id"])
 
-    # Free plan: check daily download count
     if plan == "free":
         today = datetime.now(timezone.utc).date().isoformat()
-        count_r = supabase.table("download_logs")\
-            .select("id", count="exact")\
-            .eq("user_id", user["id"])\
-            .eq("date", today)\
-            .execute()
+        count_r = supabase.table("download_logs").select("id", count="exact").eq("user_id", user["id"]).eq("date", today).execute()
         if (count_r.count or 0) >= 1:
-            raise HTTPException(
-                status_code=403,
-                detail="Free plan allows 1 PDF download per day. Upgrade to Pro for unlimited."
-            )
+            raise HTTPException(status_code=403, detail="Free plan allows 1 PDF download per day. Upgrade to Pro for unlimited.")
 
-    # Get resume data
     if body.resume_id:
         r = supabase.table("resumes").select("*").eq("id", body.resume_id).eq("user_id", user["id"]).single().execute()
         if not r.data:
@@ -428,7 +411,6 @@ async def export_pdf(body: ExportRequest, user: dict = Depends(get_current_user)
     html = build_resume_html(resume, template)
     pdf_bytes = await html_to_pdf(html)
 
-    # Log download (for free plan rate limiting)
     if plan == "free":
         supabase.table("download_logs").insert({
             "user_id": user["id"],
@@ -445,7 +427,6 @@ async def export_pdf(body: ExportRequest, user: dict = Depends(get_current_user)
 
 @app.post("/export/docx", tags=["Export"])
 async def export_docx(body: ExportRequest, user: dict = Depends(require_plan("pro"))):
-    """DOCX export — Pro and above only."""
     if body.resume_id:
         r = supabase.table("resumes").select("*").eq("id", body.resume_id).eq("user_id", user["id"]).single().execute()
         if not r.data:
@@ -464,7 +445,6 @@ async def export_docx(body: ExportRequest, user: dict = Depends(require_plan("pr
         p = resume.get("personal_info", {})
         doc = Document()
 
-        # Page margins
         for section in doc.sections:
             section.top_margin = Inches(0.75)
             section.bottom_margin = Inches(0.75)
@@ -480,7 +460,6 @@ async def export_docx(body: ExportRequest, user: dict = Depends(require_plan("pr
             run.font.size = Pt(size)
             run.font.color.rgb = RGBColor(*color)
             p_obj.paragraph_format.border_bottom = True
-            return p_obj
 
         def add_entry_header(title, subtitle, date):
             p_obj = doc.add_paragraph()
@@ -502,7 +481,6 @@ async def export_docx(body: ExportRequest, user: dict = Depends(require_plan("pr
                 r.font.color.rgb = RGBColor(79, 70, 229)
                 r.italic = True
 
-        # Name & contact
         name_p = doc.add_paragraph()
         name_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
         name_r = name_p.add_run(p.get("fullName", "Your Name"))
@@ -521,7 +499,7 @@ async def export_docx(body: ExportRequest, user: dict = Depends(require_plan("pr
             c_p.runs[0].font.size = Pt(9)
             c_p.runs[0].font.color.rgb = RGBColor(120, 120, 140)
 
-        doc.add_paragraph()  # spacer
+        doc.add_paragraph()
 
         if p.get("summary"):
             add_heading("Professional Summary")
@@ -572,12 +550,12 @@ async def export_docx(body: ExportRequest, user: dict = Depends(require_plan("pr
         )
 
     except ImportError:
-        raise HTTPException(status_code=500, detail="python-docx not installed. Run: pip install python-docx")
+        raise HTTPException(status_code=500, detail="python-docx not installed")
     except Exception as e:
         log.error(f"DOCX export failed: {e}")
         raise HTTPException(status_code=500, detail=f"DOCX export failed: {str(e)}")
 
-# ─── AI ROUTES ────────────────────────────────────────────────────────────────
+# ─── AI ROUTES WITH DEEPSEEK ────────────────────────────────────────────────────
 @app.post("/ai/bullets", tags=["AI"])
 async def ai_bullets(body: BulletsRequest, user: dict = Depends(get_current_user)):
     plan = await get_user_plan(user["id"])
@@ -598,15 +576,15 @@ Rules:
 Return ONLY a valid JSON array of {count} strings. No explanation."""
 
     try:
-        resp = await claude.messages.create(
-            model="claude-sonnet-4-20250514",
+        resp = await deepseek.messages.create(
+            model="deepseek-v4-pro",  # Using DeepSeek V4 Pro
             max_tokens=600,
             system="You are an expert resume writer and career coach. Return only valid JSON arrays.",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         bullets = json.loads(raw)
-        return {"bullets": bullets if isinstance(bullets, list) else [], "plan": plan}
+        return {"bullets": bullets if isinstance(bullets, list) else [], "plan": plan, "ai": "deepseek"}
     except Exception as e:
         log.error(f"AI bullets error: {e}")
         raise HTTPException(status_code=500, detail="AI generation failed")
@@ -630,13 +608,13 @@ Rules:
 Return ONLY the summary text. No labels, no quotes."""
 
     try:
-        resp = await claude.messages.create(
-            model="claude-sonnet-4-20250514",
+        resp = await deepseek.messages.create(
+            model="deepseek-v4-pro",
             max_tokens=200,
             system="You are an expert resume writer. Write powerful, specific summaries.",
             messages=[{"role": "user", "content": prompt}]
         )
-        return {"summary": resp.content[0].text.strip()}
+        return {"summary": resp.content[0].text.strip(), "ai": "deepseek"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="AI generation failed")
 
@@ -647,21 +625,20 @@ Mix technical and soft skills. Be specific (e.g., "React.js" not "JavaScript fra
 Return ONLY a valid JSON array of strings."""
 
     try:
-        resp = await claude.messages.create(
-            model="claude-sonnet-4-20250514",
+        resp = await deepseek.messages.create(
+            model="deepseek-v4-pro",
             max_tokens=300,
             system="Return only valid JSON arrays.",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         skills = json.loads(raw)
-        return {"skills": skills if isinstance(skills, list) else []}
+        return {"skills": skills if isinstance(skills, list) else [], "ai": "deepseek"}
     except Exception as e:
         raise HTTPException(status_code=500, detail="AI generation failed")
 
 @app.post("/ai/match", tags=["AI"])
 async def ai_match(body: MatchRequest, user: dict = Depends(require_plan("pro"))):
-    """Job match analysis — Pro+ only."""
     p = body.resume_data.get("personal_info", {})
     experience = body.resume_data.get("experience", [])
     skills = body.resume_data.get("skills", [])
@@ -690,28 +667,27 @@ Return ONLY valid JSON with this exact structure:
 }}"""
 
     try:
-        resp = await claude.messages.create(
-            model="claude-sonnet-4-20250514",
+        resp = await deepseek.messages.create(
+            model="deepseek-v4-pro",
             max_tokens=500,
             system="You are an ATS expert. Return only valid JSON.",
             messages=[{"role": "user", "content": prompt}]
         )
         raw = resp.content[0].text.strip().replace("```json", "").replace("```", "").strip()
         result = json.loads(raw)
-        return result
+        return result | {"ai": "deepseek"}
     except Exception as e:
         log.error(f"AI match error: {e}")
         raise HTTPException(status_code=500, detail="AI analysis failed")
 
 # ─── PAYMENT ROUTES ───────────────────────────────────────────────────────────
 PLAN_AMOUNTS = {
-    "pro":      450000,   # ₦4,500 in kobo
-    "lifetime": 1990000,  # ₦19,900 in kobo
+    "pro":      450000,
+    "lifetime": 1990000,
 }
 
 @app.post("/payments/initialize", tags=["Payments"])
 async def initialize_payment(body: InitPaymentRequest, user: dict = Depends(get_current_user)):
-    """Initialize a Paystack transaction and return authorization URL."""
     if body.plan not in PLAN_AMOUNTS:
         raise HTTPException(status_code=400, detail="Invalid plan. Must be 'pro' or 'lifetime'")
 
@@ -746,7 +722,6 @@ async def initialize_payment(body: InitPaymentRequest, user: dict = Depends(get_
     if not data.get("status"):
         raise HTTPException(status_code=400, detail=data.get("message", "Paystack initialization failed"))
 
-    # Log pending transaction
     supabase.table("payment_logs").insert({
         "user_id": user["id"],
         "reference": reference,
@@ -764,7 +739,6 @@ async def initialize_payment(body: InitPaymentRequest, user: dict = Depends(get_
 
 @app.post("/payments/verify", tags=["Payments"])
 async def verify_payment(body: VerifyPaymentRequest, user: dict = Depends(get_current_user)):
-    """Verify a Paystack transaction by reference and upgrade user plan."""
     async with httpx.AsyncClient() as client:
         resp = await client.get(
             f"https://api.paystack.co/transaction/verify/{body.reference}",
@@ -779,13 +753,11 @@ async def verify_payment(body: VerifyPaymentRequest, user: dict = Depends(get_cu
     metadata = tx.get("metadata", {})
     paid_user_id = metadata.get("user_id", user["id"])
 
-    # Security: ensure the reference belongs to this user
     if paid_user_id != user["id"]:
         raise HTTPException(status_code=403, detail="Reference does not belong to this account")
 
     plan = metadata.get("plan", body.plan)
 
-    # Upsert subscription
     supabase.table("subscriptions").upsert({
         "user_id": user["id"],
         "plan": plan,
@@ -795,7 +767,6 @@ async def verify_payment(body: VerifyPaymentRequest, user: dict = Depends(get_cu
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }, on_conflict="user_id").execute()
 
-    # Update payment log
     supabase.table("payment_logs").update({
         "status": "success",
         "verified_at": datetime.now(timezone.utc).isoformat(),
@@ -806,15 +777,9 @@ async def verify_payment(body: VerifyPaymentRequest, user: dict = Depends(get_cu
 
 @app.post("/payments/webhook", tags=["Payments"])
 async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
-    """
-    Paystack webhook endpoint.
-    Verifies HMAC signature then processes charge.success events.
-    Set this URL in your Paystack dashboard → Settings → Webhooks.
-    """
     body_bytes = await request.body()
     signature = request.headers.get("x-paystack-signature", "")
 
-    # Verify webhook signature
     expected = hmac.new(
         PAYSTACK_WEBHOOK_SECRET.encode("utf-8"),
         body_bytes,
@@ -837,7 +802,6 @@ async def paystack_webhook(request: Request, background_tasks: BackgroundTasks):
     return {"received": True}
 
 async def _handle_successful_charge(tx: dict):
-    """Background task: activate plan after confirmed webhook."""
     try:
         metadata = tx.get("metadata", {})
         user_id = metadata.get("user_id")
@@ -888,3 +852,7 @@ async def get_stats(user: dict = Depends(get_current_user)):
             "downloads_per_day": 1 if plan == "free" else None,
         }
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
